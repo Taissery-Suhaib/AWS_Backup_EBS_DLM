@@ -19,10 +19,13 @@ _____________________we have a parameters for resource of EC2-Backup and EBS_lif
 
    step : 3
          we create a ***DLM_Policy***  with target tags as ec2 
+         
    step : 4 
         we create a backup plan with a cronjob attach which will automate your backup and mention the life cycle of backup 
+        
    step : 5 
          we create a ***BackUp_Vault*** : where our recovery point of resource is stored and has a kms key for encryption 
+         
    step  : 6 
          Backup plan selection : specifing the backup_plan id with the list of tag in which the ec2 tag has to be selected fot backup
 
