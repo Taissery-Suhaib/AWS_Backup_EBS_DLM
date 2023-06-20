@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Setup DLM parameter, LaunchTemplate
+# dlm-LifecyclePolicy-LaunchTemplate.yaml
+Parameters:
+  VPC:
+    Description: VPC ID
+    Type: AWS::EC2::VPC::Id
+  SubnetID:
+    Description: Subnet ID
+    Type: AWS::EC2::Subnet::Id
+  InstanceType:
+    Description: EC2 InstanceType
+    Type: String
+    Default: t2.micro
+  Ec2InstanceName:
+    Description: Ec2 Instance Name
+    Type: String
+    Default: ec2-dlm-test
+  Ec2ImageId:
+    Type: String
+    Default: ami-05842f1afbf311a43
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.micro
+    ConstraintDescription: must be a valid EC2 instance type.
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    Default: 0.0.0.0/0
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+
+Resources:
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref 'InstanceType'
+      SecurityGroups: [!Ref 'InstanceSecurityGroup']
+      KeyName: !Ref 'KeyName'
+      ImageId: ami-05842f1afbf311a43
+      UserData: !Base64 |
+        #!/bin/bash -ex
+        yum update -y
+        yum install -y httpd.x86_64
+        systemctl start httpd.service
+        systemctl enable httpd.service
+        echo ?Hello World from $(hostname -f)? > /var/www/html/index.html
+      Tags:
+        - Key: NAME
+          Value: EC2_BACKUP
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH access via port 22
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Ref 'SSHLocation'
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+
+  DlmServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - dlm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /service-role/
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole
+  DlmLifecyclePolicy:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: DLM Lifecycle Policy using CloudFormation
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt 'DlmServiceRole.Arn'
+      PolicyDetails:
+        ResourceTypes:
+          - VOLUME
+        TargetTags:
+          - Key: NAME
+            Value: EC2_BACKUP
+        Schedules:
+          - Name: Daily Snapshots
+            TagsToAdd:
+              - Key: EC2
+                Value: DailySnapshot
+            CreateRule:
+              Interval: 24 
+              IntervalUnit: HOURS   
+              Times:
+                - '16:00'
+            RetainRule:
+              Count: 7
+            CopyTags: true
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: default
+        BackupPlanRule:
+          - RuleName: daily-backups
+            TargetBackupVault: !Ref BackupVault
+            ScheduleExpression: cron(0 5 ? * * *)
+            StartWindowMinutes: 60
+            Lifecycle:
+              DeleteAfterDays: 60 
+
+  
+  BackupVault:
+    Type: AWS::Backup::BackupVault
+    Properties:
+      BackupVaultName: Taissery-121
+      EncryptionKeyArn: !GetAtt BackupVaultKey.Arn
+
+  BackupVaultKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encryption key for daily
+      Enabled: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:*
+            Resource: '*'
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - backup.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupSelection:
+        BackupPlanId: !GetAtt BackupRole.id
+        SelectionName: daily-backup-tag
+        IamRoleArn: !GetAtt 'BackupRole.Arn'
+        ListOfTags:
+          - ConditionType: STRINGEQUALS
+            ConditionKey: NAME
+            ConditionValue: EC2_BACKUP
+
+
+  MyBackupPlanAssignment:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      SelectionId: !Ref BackupSelection
+      BackupVaultName: !Ref BackupVault
